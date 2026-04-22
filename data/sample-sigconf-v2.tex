@@ -200,25 +200,33 @@
 %% The abstract is a short summary of the work to be presented in the
 %% article.
 \begin{abstract}
+  LLM-based Agent systems compose multiple inference calls into
+  dynamic execution graphs, posing three fundamental challenges for
+  global scheduling: nonlinear topologies with conditional branches
+  and feedback loops, heterogeneous per-node inference costs, and KV
+  cache affinity in tension with load balance. Existing schedulers
+  address these only partially---topology-aware queuing breaks down
+  when dynamic branches invalidate static stage estimates, while
+  Round-Robin and Session Affinity represent opposite extremes that
+  trade off cache reuse against load balance without adaptation.
   We present \textbf{RAGS} (\underline{R}L-based \underline{A}gent
-  \underline{G}lobal \underline{S}cheduler), a two-tier global
-  scheduling framework for multi-tenant LLM Agent serving systems.
-  The first tier, \textbf{DynA}, is a topology-agnostic queuing
-  algorithm that prioritizes requests via an online-estimated
-  conditional near-completion probability over per-Agent-type
-  completion round distributions, augmented with an anti-starvation
-  mechanism. The second tier is an \textbf{RL-based dispatcher} that
-  models request-to-instance assignment as an MDP and trains a
-  Transformer policy with Double-DQN to jointly optimize KV cache
-  reuse, load balance, and queue congestion, using offline
-  pretraining and online fine-tuning for continuous adaptation.
-  Experiments on a simulated 4-instance LLM cluster across three
-  representative Agent workloads show that RAGS reduces mean
-  end-to-end latency by up to \textbf{5.2$\times$} over Round-Robin
-  and \textbf{3--4$\times$} over Session Affinity, outperforming
-  state-of-the-art schedulers Parrot and Ayo. Ablation and
-  heterogeneous GPU cluster experiments further validate the
-  complementary contributions and generalizability of both tiers.
+  \underline{G}lobal \underline{S}cheduler), a two-tier framework
+  that co-designs queuing and dispatch to address these challenges
+  jointly. The queuing tier, \textbf{DynA}, prioritizes requests via
+  an online-estimated conditional near-completion probability over
+  per-Agent-type completion-round distributions, augmented with
+  cumulative-latency-aware ordering and anti-starvation, all without
+  relying on any predefined topology. The dispatch tier models
+  request-to-instance assignment as an MDP and trains a
+  Transformer-based policy with Double-DQN to jointly optimize KV
+  cache reuse, load balance, and queue congestion via offline
+  pretraining and online fine-tuning. Experiments on a simulated
+  4-instance LLM cluster across three representative Agent workloads
+  show that RAGS reduces mean end-to-end latency by up to
+  \textbf{5.2$\times$} over Round-Robin and \textbf{3--4$\times$}
+  over Parrot and Ayo; ablation and heterogeneous GPU cluster
+  experiments further confirm the complementary contributions and
+  generalizability of both tiers.
 \end{abstract}
 
 %%
@@ -262,13 +270,13 @@
 %% A "teaser" image appears between the author and affiliation
 %% information and the body of the document, and typically spans the
 %% page.
-\begin{teaserfigure}
-  \includegraphics[width=\textwidth]{sampleteaser}
-  \caption{Seattle Mariners at Spring Training, 2010.}
-  \Description{Enjoying the baseball game from the third-base
-  seats. Ichiro Suzuki preparing to bat.}
-  \label{fig:teaser}
-\end{teaserfigure}
+%\begin{teaserfigure}
+%  \includegraphics[width=\textwidth]{sampleteaser}
+%  \caption{Seattle Mariners at Spring Training, 2010.}
+%  \Description{Enjoying the baseball game from the third-base
+%  seats. Ichiro Suzuki preparing to bat.}
+%  \label{fig:teaser}
+%\end{teaserfigure}
 
 \received{20 February 2007}
 \received[revised]{12 March 2009}
@@ -280,85 +288,322 @@
 \maketitle
 
 \section{Introduction}
-ACM's consolidated article template, introduced in 2017, provides a
-consistent \LaTeX\ style for use across ACM publications, and
-incorporates accessibility and metadata-extraction functionality
-necessary for future Digital Library endeavors. Numerous ACM and
-SIG-specific \LaTeX\ templates have been examined, and their unique
-features incorporated into this single new template.
 
-If you are new to publishing with ACM, this document is a valuable
-guide to the process of preparing your work for publication. If you
-have published with ACM before, this document provides insight and
-instruction into more recent changes to the article template.
+Large Language Models (LLMs) have rapidly advanced from standalone
+research artifacts to the computational backbone of a broad class of
+intelligent applications. Modern LLM-based Agent systems---encompassing
+multi-turn chatbots, autonomous code generation pipelines, and
+large-scale document processing workflows---increasingly compose
+multiple LLM inference calls into structured, multi-step execution
+graphs. As such Agent deployments scale from research prototypes to
+production services handling thousands of concurrent workflows,
+the efficiency of the underlying LLM inference infrastructure has
+become a critical concern. In this context, the \emph{global scheduler}
+of a multi-tenant LLM serving cluster plays a central role: it must
+simultaneously determine the \emph{execution order} of pending requests
+and \emph{dispatch} each request to an appropriate backend instance,
+with the overarching goal of minimizing end-to-end workflow latency
+under dynamic, heterogeneous load.
 
-The ``\verb|acmart|'' document class can be used to prepare articles
-for any ACM publication --- conference or journal, and for any stage
-of publication, from review to final ``camera-ready'' copy, to the
-author's own version, with {\itshape very} few changes to the source.
+Classical scheduling strategies developed for stateless, single-turn
+inference fail to meet this challenge because they rest on assumptions
+that LLM Agent workloads systematically violate. First, Agent workflows
+exhibit \emph{dynamic, nonlinear topologies}---including conditional
+branches and iterative repair loops---whose actual execution paths and
+depths are only determined at runtime, precluding static graph-based
+priority estimation. Second, requests emitted at different stages of
+the same workflow are \emph{highly heterogeneous} in input length,
+output length, and GPU memory footprint, so uniform treatment causes
+severe head-of-line blocking and resource imbalance. Third, adjacent
+calls within a workflow share heavily overlapping context prefixes,
+creating significant \emph{KV cache reuse} opportunities that are
+tightly coupled with, and in tension with, global load balance.
 
-\section{Template Overview}
-As noted in the introduction, the ``\verb|acmart|'' document class can
-be used to prepare many different kinds of documentation --- a
-double-anonymous initial submission of a full-length technical paper, a
-two-page SIGGRAPH Emerging Technologies abstract, a ``camera-ready''
-journal article, a SIGCHI Extended Abstract, and more --- all by
-selecting the appropriate {\itshape template style} and {\itshape
-  template parameters}.
+Existing approaches address these challenges only partially. On the
+queuing side, First-Come-First-Served (FCFS) is entirely blind to
+workflow progress, leading to cascading latency amplification along
+data-flow edges. Topology-aware strategies such as Ayo~\cite{tan2025towards}
+assign priority by static residual stage counts, but break down when
+dynamic branches and loops cause the estimated stage depth to diverge
+sharply from the true execution trajectory. On the dispatch side,
+Round-Robin distributes requests evenly without exploiting prefix-cache
+locality, while Session Affinity maximizes cache reuse but creates
+severe hotspots when parallel fan-out stages concentrate bursty
+requests on a single instance. Parrot~\cite{lin2024parrot} employs
+static session binding and multi-objective linear weighting, yet its
+fixed-weight heuristics cannot adapt to the continuously shifting
+cluster state induced by dynamic Agent workloads, causing catastrophic
+load imbalance under feedback-repair scenarios. Taken together, these
+limitations demonstrate that effective global scheduling for LLM Agent
+serving requires the \emph{co-design} of queuing and dispatch: neither
+tier can achieve robust performance in isolation.
 
-This document will explain the major features of the document
-class. For further information, the {\itshape \LaTeX\ User's Guide} is
-available from
-\url{https://www.acm.org/publications/proceedings-template}.
+We present \textbf{RAGS} (\underline{R}L-based \underline{A}gent
+\underline{G}lobal \underline{S}cheduler), a two-tier global scheduling
+framework that addresses both dimensions in a coordinated manner.
+The queuing tier, \textbf{DynA}, makes all priority decisions using
+only runtime-observable signals---online-estimated completion-round
+distributions, accumulated workflow latency, and per-request queue
+age---without any dependence on a predefined workflow topology. The
+dispatch tier employs a \emph{reinforcement learning} policy that
+models request-to-instance assignment as a Markov Decision Process
+and trains a Transformer-based network with Double-DQN to jointly
+optimize KV cache reuse, load balance, and queue congestion, adapting
+continuously through offline pretraining and online fine-tuning.
 
-\subsection{Template Styles}
-
-The primary parameter given to the ``\verb|acmart|'' document class is
-the {\itshape template style} which corresponds to the kind of publication
-or SIG publishing the work. This parameter is enclosed in square
-brackets and is a part of the {\verb|documentclass|} command:
-\begin{verbatim}
-  \documentclass[STYLE]{acmart}
-\end{verbatim}
-
-Journals use one of three template styles. All but three ACM journals
-use the {\verb|acmsmall|} template style:
+The main contributions of this paper are as follows.
 \begin{itemize}
-\item {\texttt{acmsmall}}: The default journal template style.
-\item {\texttt{acmlarge}}: Used by JOCCH and TAP.
-\item {\texttt{acmtog}}: Used by TOG.
+  \item We propose a dynamic-aware queuing algorithm that estimates
+        each request's near-completion probability from online-collected
+        statistics, enabling workflow-progress-aware priority ordering
+        and reducing head-of-line blocking across concurrent workflows.
+
+  \item To the best of our knowledge, RAGS is the first system to apply
+        reinforcement learning to global dispatch in LLM Agent serving.
+        By jointly encoding heterogeneous cluster features---including
+        KV-cache state, load histograms, and GPU hardware type---the RL
+        policy achieves adaptive multi-objective optimization that
+        consistently outperforms static rule-based policies.
+
+  \item Evaluation on a simulated LLM system shows that RAGS reduces
+        mean end-to-end latency by up to \textbf{5.2$\times$} over
+        Round-Robin and \textbf{3--4$\times$} over Parrot and Ayo.
+        Ablation studies and heterogeneous GPU cluster experiments
+        further confirm the complementary contributions and
+        generalizability of both tiers.
 \end{itemize}
 
-The majority of conference proceedings documentation will use the {\verb|acmconf|} template style.
-\begin{itemize}
-\item {\texttt{sigconf}}: The default proceedings template style.
-\item{\texttt{sigchi}}: Used for SIGCHI conference articles.
-\item{\texttt{sigplan}}: Used for SIGPLAN conference articles.
-\end{itemize}
+%The remainder of this paper is organized as follows.
+%Section~\ref{sec:motivation} characterizes LLM Agent workload
+%properties and motivates the co-design of queuing and dispatch.
+%Section~\ref{sec:system-design} presents the RAGS algorithm design.
+%Section~\ref{sec:implementation} describes the implementation.
+%Section~\ref{sec:evaluation} reports experimental results.
+\section{Motivation}
+\label{sec:motivation}
 
-\subsection{Template Parameters}
+LLM serving systems typically adopt a layered scheduling architecture
+in which a \emph{global scheduler} is responsible for two coupled
+decisions: (1) determining the \emph{execution order} of pending
+requests (queuing policy), and (2) assigning each request to a target
+backend instance (dispatch policy). This section characterizes the
+distinctive properties of LLM Agent workloads and demonstrates why
+standard request-level heuristics for both decisions are fundamentally
+inadequate, motivating the co-design presented in
+Section~\ref{sec:system-design}.
 
-In addition to specifying the {\itshape template style} to be used in
-formatting your work, there are a number of {\itshape template parameters}
-which modify some part of the applied template style. A complete list
-of these parameters can be found in the {\itshape \LaTeX\ User's Guide.}
+\subsection{Characteristics of LLM Agent Workflows}
+\label{subsec:agent-workflow}
 
-Frequently-used parameters, or combinations of parameters, include:
-\begin{itemize}
-\item {\texttt{anonymous,review}}: Suitable for a ``double-anonymous''
-  conference submission. Anonymizes the work and includes line
-  numbers. Use with the \texttt{\string\acmSubmissionID} command to print the
-  submission's unique ID on each page of the work.
-\item{\texttt{authorversion}}: Produces a version of the work suitable
-  for posting by the author.
-\item{\texttt{screen}}: Produces colored hyperlinks.
-\end{itemize}
+To gain a comprehensive understanding of LLM Agent characteristics,
+we surveyed mainstream open-source Agent projects on
+GitHub~\cite{aws2026genaichatbot,cognitivetech2026ollama,opencode2026terminal}
+and systematically analyzed representative workflow paradigms,
+including chatbots, code generation, and document summarization.
+As illustrated in Figure~\ref{fig:agent-dag}, typical Agent workflows
+can be abstracted as directed graphs in which each node represents a
+single LLM inference call or tool invocation, and each edge encodes a
+data-flow or control dependency. Based on this survey, Agent workloads
+at the system level exhibit three distinctive traits.
 
-This document uses the following string as the first command in the
-source file:
-\begin{verbatim}
-\documentclass[sigconf]{acmart}
-\end{verbatim}
+\begin{figure}[htbp]
+  \centering
+  % 倒三角形：上排 (a)(b)，下排 (c) 居中
+  \begin{subfigure}[c]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{../figures/2.1.a.png}
+    \caption{Chatbot.}
+    \label{fig:agent-dag-a}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[c]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{../figures/2.1.b.png}
+    \caption{Map-Reduce document summarization.}
+    \label{fig:agent-dag-b}
+  \end{subfigure}
+
+  \vspace{0.5cm}
+
+  \null\hfill
+  \begin{subfigure}[b]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{../figures/2.1.c.png}
+    \caption{Code generation.}
+    \label{fig:agent-dag-c}
+  \end{subfigure}
+  \hfill\null
+  \caption{Representative LLM Agent workflow structures.}
+  \label{fig:agent-dag}
+\end{figure}
+
+\textbf{Dynamic, nonlinear topology with mixed concurrency.}
+Our analysis reveals that Agent workflows deviate substantially from the
+static Directed Acyclic Graph (DAG) assumptions typical of traditional microservices.
+They inherently incorporate conditional branches and feedback loops
+(e.g., iterative repair cycles triggered by validation failures), alongside
+an indeterminate number of user-driven interaction rounds. Furthermore,
+these workflows frequently interleave strictly sequential, blocking stages
+with highly parallel fan-out operations (e.g., the Map phase in document summarization).
+Consequently, this combination of severe dynamism and irregular concurrency
+renders end-to-end execution paths highly unpredictable, posing formidable
+challenges for global resource planning.
+
+\textbf{Highly heterogeneous per-node inference cost.}
+Because nodes serve different functional roles---routing,
+generation, quality review, etc.---the LLM requests they emit
+differ substantially in input prompt length, output length, and
+end-to-end execution latency. This heterogeneity is confirmed
+by prior work reporting that latency differences across roles
+within a single application can exceed
+$25\times$~\cite{chen2025kairos}, requiring fine-grained,
+cost-aware resource management from the scheduler.
+
+\textbf{Deep context sharing and KV cache affinity.}
+Agent requests typically carry a fixed system prompt alongside
+an ever-growing conversation history. Across rounds of the same
+workflow, the system prompt remains constant and adjacent calls
+share heavily overlapping context prefixes, creating substantial
+opportunities for KV cache reuse. However, affinity-driven
+routing that always steers requests to the same instance tends
+to concentrate load and produce hotspots. Balancing KV cache
+hit rate against cluster-wide load balance is therefore a
+central tension in global scheduling.
+
+Taken together, these traits violate the classical assumption of
+independent, homogeneous requests. The following two subsections
+examine the concrete limitations that arise when standard queuing and
+dispatch policies are applied to Agent workloads.
+
+\subsection{Limitations of Existing Queuing Algorithms}
+\label{subsec:queue-challenges}
+
+Conventional LLM serving paradigms model requests as independent,
+single-turn calls, where standard First-Come-First-Served (FCFS)
+queuing suffices to maintain fairness. Agent workloads are inherently
+interdependent, however, introducing three fundamental scheduling
+complexities.
+
+\noindent\textbf{(1) Head-of-line blocking due to workflow-progress heterogeneity.}
+Concurrent Agent requests often exhibit substantial heterogeneity in their execution
+progress, i.e., at any given moment, the system processes a mixture of initial LLM calls
+and near-terminal tasks (Section~\ref{subsec:agent-workflow}). Being completely
+progress-agnostic, FCFS inevitably stalls near-completion requests behind newly admitted
+early-stage tasks, thereby artificially inflating end-to-end workflow latencies.
+
+\noindent\textbf{(2) Cascading amplification and accumulation of queuing delays.}
+Unlike isolated single-turn requests, queuing delays experienced at any individual
+workflow node propagate along dataflow dependencies. This cascading effect inherently
+stalls downstream execution. Moreover, since FCFS ranks requests purely by arrival time,
+accumulated workflow-level latency is entirely ignored, causing tail performance to
+degrade as delays compound across successive stages.
+
+\noindent\textbf{(3) Inability to handle dynamic workflow topologies.}
+Systems such as Ayo~\cite{tan2025towards} address priority assignment with a
+\emph{workflow-topology-aware} strategy (Topo) that assigns higher priority to tasks
+with fewer remaining stages. However, Topo requires a complete, static workflow graph;
+when dynamic branches or loops fire at runtime (Section~\ref{subsec:agent-workflow}),
+the statically estimated residual stage counts diverge sharply from true values, causing
+tasks in actively expanding phases to be systematically under-prioritized.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\linewidth]{../figures/2.2.pdf}
+  \caption{End-to-end latency comparison under FCFS, topology-aware
+    (Topo), and globally E2E-optimal queuing policies across four
+    concurrent Agent tasks.}
+  \Description{Placeholder for the figure comparing FCFS, topology-aware, and
+    optimal queuing on concurrent Agent tasks.}
+  \label{fig:queue-motivation}
+\end{figure}
+
+Figure~\ref{fig:queue-motivation} illustrates these effects with four
+concurrent Agent tasks on a single LLM instance (maximum batch
+size~2; per-task stage counts and durations are provided in the figure).
+Under FCFS, all four jobs' initial requests arrive nearly
+simultaneously, so the scheduler interleaves them indiscriminately,
+causing severe blocking and an average completion time of
+$(10+10+11+6)/4=9.25$\,s. Topo assigns priority by static stage count
+and preferentially schedules tasks with fewer remaining stages (e.g.,
+tasks A and D), reducing the average to $(10+9+11+1)/4=7.75$\,s.
+An \emph{E2E-cost-aware} policy that globally accounts for each task's
+total remaining work can further lower the average completion time to
+$(15+7+3+1)/4=6.5$\,s, demonstrating the headroom available to a more
+informed scheduling strategy.
+
+\subsection{Limitations of Existing Dispatch Strategies}
+\label{subsec:dispatch-challenges}
+
+Classical global dispatchers for LLMs rely predominantly on
+Round-Robin (RR), which distributes requests across instances in
+sequence to achieve load balance, or Session Affinity (SA), which
+routes all requests from the same session to a fixed instance to
+maximize KV cache reuse. Both strategies expose pronounced weaknesses
+when confronted with Agent workloads.
+
+\paragraph{RR lacks awareness of request heterogeneity.}
+Requests from different functional nodes vary greatly in context length
+and GPU memory footprint. RR's uniform assignment can inadvertently
+concentrate multiple memory-intensive requests on the same instance,
+saturating its GPU memory and triggering preemption. Preempted requests
+not only waste the computation already performed but also incur
+additional latency from re-queuing and recomputation, reducing
+system throughput.
+
+\paragraph{SA ignores bursty concurrency within a workflow.}
+In a Map--Reduce-style document summarization Agent, the Map phase
+emits dozens of parallel subtask requests simultaneously. SA binds all
+of them to a single instance, creating a severe local hotspot while
+other instances remain idle---fundamentally undermining the goal of
+cluster-wide dynamic load balance.
+
+To illustrate these trade-offs concretely,
+Figure~\ref{fig:dispatch-motivation} compares RR and SA on two
+contrasting workflow topologies, using a setup of 4 homogeneous LLM
+instances (batch size~1 each), a base inference latency of 100\,ms,
+and 80\,ms when the system-prompt KV cache is hit.
+For an 8-subtask \emph{parallel} (Map-phase) workflow, SA forces all
+concurrent requests onto one instance, yielding
+$100 + 7\!\times\!80 = 660$\,ms, whereas RR distributes them for true
+parallelism, achieving only $100 + 80 = 180$\,ms.
+For an 8-subtask \emph{sequential} (chain) workflow, the positions are
+reversed: RR routes each request to a different instance, destroying
+prefix-cache locality and inflating latency to
+$4\!\times\!100 + 4\!\times\!80 = 720$\,ms, while SA retains cache
+reuse and holds latency at $100 + 7\!\times\!80 = 660$\,ms.
+Neither policy dominates; the optimal choice depends jointly on
+execution topology, inter-request temporal dependencies, and live
+cache state.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\linewidth]{../figures/2.3.pdf}
+  \caption{RR versus Session Affinity under parallel and sequential
+    document-summarization Agent workflows.}
+  \Description{Placeholder for the figure comparing Round-Robin and Session
+    Affinity across parallel and sequential workflow shapes.}
+  \label{fig:dispatch-motivation}
+\end{figure}
+
+To address these limitations, recent systems incorporate richer
+heuristics such as multi-objective linear
+weighting~\cite{srivatsa2024preble}. However, LLM cluster state
+evolves continuously: request arrival patterns, per-instance queue
+lengths, and GPU memory utilization all change over time, and each
+dispatch decision reshapes the state distribution encountered by
+subsequent requests. Fixed-weight heuristics are ill-equipped both to
+capture the complex interactions among these dynamic signals and to
+strike an effective balance between immediate scheduling gain and
+long-horizon throughput.
+
+In summary, effective global routing for LLM Agent serving demands a
+\emph{coordinated} design of queuing and dispatch: the queuing layer
+must reflect workflow progress and accumulated urgency without relying
+on brittle static topology assumptions, while the dispatch layer must
+make adaptive decisions over high-dimensional, time-varying cluster
+state. These requirements motivate \textbf{RAGS}
+(Section~\ref{sec:system-design}), which pairs the DynA
+topology-agnostic queuing policy with an RL-based dispatcher.
 
 \section{Algorithm Design}\label{sec:system-design}
 
@@ -382,9 +627,8 @@ returned to the user.
 
 \begin{figure}[h]
   \centering
-  \fbox{\rule{0pt}{80pt}\rule{\linewidth}{0pt}}
+  \includegraphics[width=\linewidth]{../figures/3.1.pdf}
   \caption{RAGS system architecture.}
-  \Description{Placeholder for the RAGS system architecture diagram.}
   \label{fig:rags-arch}
 \end{figure}
 
@@ -556,30 +800,31 @@ DynA policy is given in Algorithm~\ref{alg:dyna}.
 
 We formalize the global scheduler's dispatch process as a Markov
 Decision Process (MDP) and solve for the optimal dispatch policy using
-reinforcement learning. Key symbols are summarized in
-Table~\ref{tab:chapter4-symbols}.
+reinforcement learning. 
+%Key symbols are summarized in
+%Table~\ref{tab:chapter4-symbols}.
 
-\begin{table}
-  \caption{Notation for the global dispatch problem.}
-  \label{tab:chapter4-symbols}
-  \begin{tabular}{ll}
-    \toprule
-    Symbol      & Definition \\
-    \midrule
-    $K$         & Number of LLM instances \\
-    $M$         & LLM model type \\
-    $G$         & GPU type \\
-    $N$         & Total number of Agent workflows \\
-    $Q_t$       & Set of pending requests at time $t$ \\
-    $r_j$       & The $j$-th request in the global queue \\
-    $w_i$       & The $i$-th Agent workflow \\
-    $q_{i:k}$   & The $k$-th request of workflow $w_i$ \\
-    $l_i$       & End-to-end completion time of $w_i$ \\
-    $s_{t:i}$   & The $i$-th sub-state of the cluster at time $t$ \\
-    $a_t^i$     & The $i$-th dispatch action at time $t$ \\
-    \bottomrule
-  \end{tabular}
-\end{table}
+% \begin{table}
+%   \caption{Notation for the global dispatch problem.}
+%   \label{tab:chapter4-symbols}
+%   \begin{tabular}{ll}
+%     \toprule
+%     Symbol      & Definition \\
+%     \midrule
+%     $K$         & Number of LLM instances \\
+%     $M$         & LLM model type \\
+%     $G$         & GPU type \\
+%     $N$         & Total number of Agent workflows \\
+%     $Q_t$       & Set of pending requests at time $t$ \\
+%     $r_j$       & The $j$-th request in the global queue \\
+%     $w_i$       & The $i$-th Agent workflow \\
+%     $q_{i:k}$   & The $k$-th request of workflow $w_i$ \\
+%     $l_i$       & End-to-end completion time of $w_i$ \\
+%     $s_{t:i}$   & The $i$-th sub-state of the cluster at time $t$ \\
+%     $a_t^i$     & The $i$-th dispatch action at time $t$ \\
+%     \bottomrule
+%   \end{tabular}
+% \end{table}
 
 Consider a service system with $K$ homogeneous LLM instances, each
 equipped with GPU $G$ and deploying model $M$. During system
@@ -608,7 +853,7 @@ queued request $r_j$ to the $a_t^j$-th LLM instance.
 
 \begin{figure}[h]
   \centering
-  \fbox{\rule{0pt}{60pt}\rule{0.8\linewidth}{0pt}}
+  \includegraphics[width=\linewidth]{../figures/3.2.png}
   \caption{Markov Decision Process for global dispatch.}
   \Description{Placeholder for the MDP diagram.}
   \label{fig:chap4-mdp}
@@ -620,47 +865,43 @@ The state $s_t$ encodes the current global system state, comprising
 features of the pending request set and the load status of each LLM
 instance.
 
-\noindent\textbf{Request feature matrix} $\mathbf{X}_t^{req}$:
+\textbf{Request state.} The matrix $\mathbf{X}_t^{req}$ comprises four distinct feature vectors:
 \begin{itemize}
-  \item $\vec{p}$: Input length vector; $p_i$ is the input length of
-        the $i$-th queued request.
-  \item $\vec{d}$: Estimated output length vector; $d_i$ is the
-        predicted output length of the $i$-th request.
-  \item $\vec{u}$: Parallel-stage indicator; $u_i$ is a Boolean flag
-        indicating whether the $i$-th request is in a
-        parallelizable workflow stage.
-  \item $\vec{\kappa}$: Workflow type vector; $\kappa_i$ uniquely
-        identifies the Agent application type of the $i$-th request.
+\item $\vec{p}$ is the input length vector, where $p_i$ denotes the number of input tokens for the $i$-th queued request.
+\item $\vec{d}$ is the estimated output length vector, where $d_i$ represents the predicted output length of the $i$-th request.
+\item $\vec{u}$ is the parallel-stage indicator vector, where $u_i \in \{0, 1\}$ flags whether the $i$-th request resides in a parallelizable workflow stage.
+\item $\vec{\kappa}$ is the workflow type vector, where $\kappa_i$ uniquely identifies the Agent application class of the $i$-th request.
 \end{itemize}
 
-For estimated output length $d_i$, we predict discrete length
-intervals following~\cite{jin2023s} rather than exact token counts.
-This coarse-grained approximation is sufficient because our MDP state
-and reward computation only require relative interval information;
-experiments show approximately 70\% interval prediction accuracy.
+Regarding the estimated output length $d_i$, we follow the methodology in~\cite{jin2023s} 
+by predicting discrete length intervals rather than exact token counts. 
+This coarse-grained approximation proves sufficient, as our designed MDP relies solely 
+on relative interval magnitudes. Empirical evaluations demonstrate an 
+interval prediction accuracy of approximately 70\%.
 
-\noindent\textbf{Cluster state} $\mathbf{X}_t^{inst}$ is formed by
-concatenating per-instance feature vectors. Each LLM instance is
-characterized by:
+\textbf{Cluster state.} The matrix $\mathbf{X}_t^{inst}$ is constructed by 
+concatenating individual per-instance feature vectors. Specifically, 
+the runtime profile of each LLM instance is characterized by:
 \begin{itemize}
-  \item $\vec{m}$: One-hot vector for the instance's model type.
-  \item $\vec{g}$: One-hot vector for the instance's GPU type.
-  \item $\vec{wq}$: Load histogram of requests in the waiting queue,
-        obtained by binning input lengths with step size $bin\_width$.
-  \item $\vec{rq}$: Load histogram of active (running) requests;
-        Prefill-stage requests are binned by input length, Decode-stage
-        requests by estimated output length.
-  \item $c$: GPU memory utilization, defined as the ratio of occupied
-        KV-cache blocks to total blocks.
-  \item $s$: Prefix-cache reuse rate of the pending request on this
-        instance---the fraction of expected reusable tokens.
-  \item $b$: Estimated batch execution latency, tracked as the
-        sliding-window average of recent batch processing times.
+  \item $\vec{m}$ and $\vec{g}$: One-hot encoded vectors specifying the instance's deployed 
+  model architecture and underlying GPU hardware, respectively.
+  \item $\vec{wq}$: A load histogram of the waiting queue, derived by binning input lengths 
+  with a configurable step size $\mathit{bin\_width}$.
+  \item $\vec{rq}$: A load histogram of active execution queues. Prefill-stage requests 
+  are binned by input token length, whereas Decode-stage requests are binned by estimated 
+  output length.
+  \item $c$: GPU memory utilization, computed as the proportion of allocated KV-cache blocks 
+  to the total block capacity.
+  \item $s$: The expected prefix-cache reuse rate for the pending request, 
+  quantified as the fraction of reusable tokens.
+  \item $b$: The estimated batch execution latency, maintained via a sliding-window 
+  average of recent iteration times.
 \end{itemize}
 
-All features are normalized. The complete state is
-$s_t = [\mathbf{X}_t^{req} \,\|\, \mathbf{X}_t^{inst}]$, where
-$\,\|\,$ denotes concatenation.
+To ensure training stability, all features are strictly normalized. 
+The comprehensive MDP state representation is thus formulated as 
+$s_t = [\mathbf{X}_t^{req} \,\|\, \mathbf{X}_t^{inst}]$, where $\,\|\,$ 
+denotes the concatenation operator.
 
 \subsubsection{Reward Function}
 
@@ -720,9 +961,9 @@ Figure~\ref{fig:dispatch-policy-net} shows the network topology.
 
 \begin{figure}[h]
   \centering
-  \fbox{\rule{0pt}{80pt}\rule{\linewidth}{0pt}}
+  \includegraphics[width=\linewidth]{../figures/3.3.pdf}
   \caption{Dispatch policy network architecture.}
-  \Description{Placeholder for the policy network architecture diagram.}
+  %\Description{Placeholder for the policy network architecture diagram.}
   \label{fig:dispatch-policy-net}
 \end{figure}
 
@@ -778,57 +1019,49 @@ various load intensities, improving generalization.
 For the high-dimensional discrete action space, we adopt the
 \emph{Double-DQN} algorithm~\cite{van2016deep}, which decouples
 target action selection from value estimation to suppress Q-value
-overestimation. Its target is:
-\begin{equation}
-  \label{eq:ddqn-target}
-  Y_t^{DDQN} = r_t + \gamma\,Q\!\left(s_{t+1},
-               \arg\max_{a'}Q(s_{t+1},a';\theta_t);\,\theta_t^-\right),
-\end{equation}
-where $\theta_t$ is the online network (action selection) and
-$\theta_t^-$ is the target network (value evaluation). We replace the
-original MSE loss with Huber Loss~\cite{huber1992robust}, which
+overestimation. 
+%Its target is:
+%\begin{equation}
+%  \label{eq:ddqn-target}
+%  Y_t^{DDQN} = r_t + \gamma\,Q\!\left(s_{t+1},
+%               \arg\max_{a'}Q(s_{t+1},a';\theta_t);\,\theta_t^-\right),
+%\end{equation}
+%where $\theta_t$ is the online network (action selection) and
+%$\theta_t^-$ is the target network (value evaluation). 
+We replace the original MSE loss with Huber Loss~\cite{huber1992robust}, which
 applies linear penalty for large TD errors, significantly improving
 training stability under heterogeneous request sequences.
 
 \textbf{Online Fine-tuning.}
-While offline training gives the model basic scheduling capability,
-static parameters may degrade on highly dynamic production clusters.
-We therefore introduce online fine-tuning: the agent continuously
-writes interaction data to an experience replay buffer and periodically
-updates network parameters at a small learning rate when accumulated
-samples reach a threshold. To ensure service-quality stability, we
-limit the $\epsilon$-greedy exploration rate and apply momentum-based
-smooth target network updates, preventing Q-value oscillation under
-distribution shift.
+Although offline training establishes baseline scheduling capabilities, 
+static policies often suffer performance degradation in highly dynamic production clusters. 
+Consequently, we introduce an online fine-tuning mechanism. The agent continuously records 
+interaction transitions into an experience replay buffer, triggering periodic parameter 
+updates at a low learning rate once a predefined sample threshold is reached. 
+To maintain Quality of Service stability, we bound the $\epsilon$-greedy exploration rate 
+and employ momentum-based soft updates for the target network, effectively mitigating 
+Q-value oscillations under distribution shifts.
 
 \section{Implementation}\label{sec:implementation}
 
-To support RL agent training and system evaluation, we build our
-experimental environment on top of Vidur~\cite{agrawal2024vidur}, an
-open-source LLM inference simulation framework. As a highly extensible
-system-level simulator, Vidur natively supports heterogeneous GPU
-architectures including NVIDIA A100, A40, and H100, and provides
-built-in performance benchmarks for mainstream model families such as
-Llama and Qwen. It enables performance analysis across different
-workloads and configurations, facilitating both optimal hardware
-allocation strategies and rapid validation of novel scheduling
-algorithms.
+To support RL agent training and system evaluation, we build our testbed upon 
+Vidur~\cite{agrawal2024vidur}, an open-source LLM inference simulator. 
+Vidur natively supports heterogeneous GPUs (e.g., A100, H100) and provides 
+built-in benchmarks for mainstream models like Llama and Qwen, enabling rapid 
+validation of scheduling algorithms across diverse configurations.
 
-However, the native Vidur framework is designed primarily for
-single-turn LLM inference requests. It cannot directly simulate the
-complex multi-round interaction dependencies in Agent workflows, nor
-does it support prefix-cache reuse optimizations. We therefore extend
-Vidur's underlying implementation along two dimensions.
+However, native Vidur primarily targets single-turn LLM requests. 
+It lacks the capability to simulate the multi-step interaction dependencies 
+inherent in Agent workflows, nor does it support prefix-cache reuse. 
+To address these limitations, we augment Vidur's core engine along two dimensions:
 
 \subsection{KV Cache Reuse}
 
-For the LLM engine (local scheduler), we design and implement a
-\texttt{tree\_cache} module that supports KV cache reuse, built on top
-of Vidur's \texttt{memory\_pool} memory management module. This module
-consists of a \emph{Block Manager} and a \emph{Local Prefix Cache
-Tree}. The Block Manager handles allocation and reclamation of memory
-blocks, while the Local Prefix Cache Tree maintains prefix-mapping
-relationships for KV caches within each LLM instance.
+To enable KV cache reuse within the LLM engine (i.e., the local scheduler), 
+we implement a \texttt{tree\_cache} module atop Vidur's native \texttt{memory\_pool}. 
+This module comprises two core components: a \emph{Block Manager} responsible for 
+the allocation and reclamation of memory blocks, and a \emph{Local Prefix Cache Tree} 
+that maintains the prefix-mapping relationships of KV caches within each LLM instance.
 
 As shown in Figure~\ref{fig:tree-cache-total}, different request
 prefixes branch from the root node. Each node contains three types of
@@ -855,9 +1088,17 @@ management.
 
 \begin{figure}[h]
   \centering
-  \fbox{\rule{0pt}{80pt}\rule{\linewidth}{0pt}}
+  \begin{subfigure}[t]{0.49\linewidth}
+    \centering
+    \includegraphics[width=\linewidth,height=0.22\textheight,keepaspectratio]{../figures/4.1.a.png}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.49\linewidth}
+    \centering
+    \includegraphics[width=\linewidth,height=0.22\textheight,keepaspectratio]{../figures/4.1.b.png}
+  \end{subfigure}
   \caption{KV cache prefix trees: local (left) and global (right).}
-  \Description{Placeholder for the KV cache prefix tree diagram.}
+  \Description{KV cache prefix trees: local tree (left) and global tree
+    (right).}
   \label{fig:tree-cache-total}
 \end{figure}
 
@@ -931,7 +1172,7 @@ covering serial, parallel, and hybrid topologies.
 Figure~\ref{fig:four-images-total} shows the token-length and
 request-count distributions of each workload.
 
-\noindent\textbf{ChatBot (serial).}
+\textbf{ChatBot (serial).}
 We build approximately 8\,000 multi-turn dialogue workflows from the
 ShareGPT dataset~\cite{chiang2023vicuna}, each containing 2--20
 dialogue rounds. The input length follows a right-skewed distribution
@@ -939,7 +1180,7 @@ dialogue rounds. The input length follows a right-skewed distribution
 output lengths are more concentrated (mean $\approx$191.78 tokens),
 reflecting the long-input/short-output pattern of conversation tasks.
 
-\noindent\textbf{Map-Reduce Summarization (parallel).}
+\textbf{Map-Reduce Summarization (parallel).}
 We construct a Map-Reduce document summarization Agent: the Map phase
 splits long documents into chunks and issues concurrent LLM requests
 for sub-summaries; the Reduce phase aggregates them into a final
@@ -948,7 +1189,7 @@ build approximately 1\,000 workflows with 2--50 LLM requests each. The
 mean input length is $\approx$833.51 tokens with higher variance than
 ChatBot, and the mean output length is $\approx$186.51 tokens.
 
-\noindent\textbf{Code Generation Agent (hybrid).}
+\textbf{Code Generation Agent (hybrid).}
 We design a multi-stage Agent following the pipeline
 User $\to$ Planner $\to$ Workers $\to$ Evaluators $\to$ Verifier $\to$
 Final Output. If the code fails evaluation, a feedback loop triggers
@@ -1004,47 +1245,32 @@ in preset ratios is evaluated. Workflow inter-arrival times follow a
 Poisson distribution. All experiments use the Llama3-8B model by
 default.
 
-\subsection{Baselines and Metrics}
+\subsection{Baselines}
 
 We compare RAGS against the following baselines.
 
-\noindent\textbf{Round-Robin.}
-Combines FCFS queuing with round-robin dispatch, treating all requests
-independently without any Agent workflow information. This is the most
-basic global scheduling strategy.
+\textbf{Round-Robin.}
+Serving as our naive baseline, this strategy pairs First-Come-First-Serve (FCFS) 
+queuing with round-robin dispatch. It treats all inference requests independently, 
+operating entirely without Agent workflow awareness.
 
-\noindent\textbf{Parrot~\cite{lin2023parrot}.}
-An end-to-end LLM application serving system. Parrot abstracts
-semantic variables to expose inter-request DAG dependencies and prompt
-structure to the serving layer. At the scheduling level it aggregates
-similar requests based on application-level performance goals; at the
-dispatch level it employs session affinity to route correlated requests
-to the same instance for maximum KV-cache prefix reuse. We faithfully
-replicate its core queuing and dispatch strategies in our simulation
-without including its low-level engineering optimizations.
+\textbf{Parrot~\cite{lin2024parrot}.}
+A state-of-the-art end-to-end LLM application serving system. 
+Parrot utilizes semantic variable abstraction to expose inter-request 
+DAG dependencies and prompt structures to the underlying serving layer. 
+At the scheduling level, it aggregates similar requests to satisfy application-level 
+performance goals; at the dispatch level, it employs session affinity 
+to route correlated requests, thereby maximizing KV-cache prefix reuse. 
+In our evaluation, we faithfully replicate its core FCFS queuing and 
+session affinity routing algorithms, 
+abstracting away hardware-specific engineering optimizations.
 
-\noindent\textbf{Ayo~\cite{tan2025towards}.}
-A fine-grained LLM application orchestration framework that converts
-workflows into task-level dataflow graphs and applies dependency
-pruning and prefill splitting. Its queuing policy prioritizes requests
-in later workflow stages based on topological depth; its dispatch
-policy uses basic round-robin routing. As with Parrot, we replicate
-only its topology-aware queuing and round-robin dispatch.
-
-We evaluate all methods using four metrics.
-
-\begin{itemize}
-  \item \textbf{Mean E2E Latency}: average end-to-end latency from the
-        arrival of the first request of an Agent workflow to the return
-        of the final result, measuring overall service efficiency.
-  \item \textbf{P95 E2E Latency}: 95th-percentile end-to-end workflow
-        latency, measuring tail-latency control and QoS guarantees
-        under high concurrency.
-  \item \textbf{P50 TTFT}: median time-to-first-token, reflecting
-        queuing delay and prefill efficiency.
-  \item \textbf{P50 TPOT}: median per-output-token latency during
-        decoding, reflecting batch-processing efficiency.
-\end{itemize}
+\textbf{Ayo~\cite{tan2025towards}.}
+A fine-grained LLM orchestration framework that translates workflows into task-level dataflow graphs, 
+leveraging dependency pruning and prefill splitting. Its queuing policy prioritizes requests 
+based on their topological depth, while its dispatch mechanism relies on basic round-robin 
+routing. Similar to Parrot, we isolate and implement only its topology-aware queuing 
+and routing logic for comparison.
 
 \subsection{Main Results}
 
@@ -1061,7 +1287,7 @@ Figure~\ref{fig:exp-e2e-latency} shows the end-to-end performance of
 each method under the three single-type workloads at varying request
 arrival rates.
 
-\noindent\textbf{ChatBot (serial).}
+\textbf{ChatBot (serial).}
 At an arrival rate of 20 workflows/s, RAGS achieves up to
 \textbf{5.2$\times$} lower mean E2E latency than Round-Robin and Ayo.
 For TTFT, Round-Robin's P50 surges to 17\,s under high concurrency,
@@ -1072,7 +1298,7 @@ topology with highly regular KV-cache sharing, allowing Parrot's
 static prefix-aware routing to effectively exploit the cache; the
 headroom for dynamic routing is therefore limited.
 
-\noindent\textbf{Map-Reduce Summarization (parallel).}
+\textbf{Map-Reduce Summarization (parallel).}
 Since this workflow has a simple two-level topology, the overall gains
 of RAGS over baselines are moderate. At 20 workflows/s, RAGS reduces
 mean E2E latency by only $\approx$6\% over Round-Robin. Ayo's
@@ -1082,7 +1308,7 @@ however, estimates workflow progress and preferentially schedules
 requests about to trigger the Reduce aggregation, partially alleviating
 inter-node synchronization blocking.
 
-\noindent\textbf{Code Generation Agent (hybrid).}
+\textbf{Code Generation Agent (hybrid).}
 This workload introduces autonomous feedback-repair loops and is
 designed to assess the scheduler's ability to handle highly dynamic
 topologies. Parrot causes severe queue congestion in this scenario:
@@ -1103,7 +1329,7 @@ balance, keeps P50 TTFT below 0.5\,s under the same heavy load,
 demonstrating that two-tier co-design effectively suppresses TTFT
 spikes in dynamic workflows.
 
-\noindent\textbf{Mixed workload.}
+\textbf{Mixed workload.}
 Real production environments feature highly heterogeneous mixed
 workloads. We construct a mixed dataset of 500 workflows and vary the
 proportions $(x, y, z)$ of ChatBot, Summarization, and Code Agent
@@ -1113,9 +1339,9 @@ four representative mixture ratios.
 
 \begin{figure}[h]
   \centering
-  \fbox{\rule{0pt}{80pt}\rule{\linewidth}{0pt}}
-  \caption{End-to-end performance comparison under mixed workloads.}
-  \Description{Placeholder for the mixed-workload E2E latency figure.}
+  \includegraphics[width=\linewidth]{../figures/5.4.pdf}
+  \caption{End-to-end performance comparison under mixed loads.}
+  %\Description{A woman and a girl in white dresses sit in an open car.}
   \label{fig:exp-e2e-latency-mix}
 \end{figure}
 
@@ -1138,7 +1364,7 @@ Code-Agent-inclusive scenario.
 
 \begin{figure}[h]
   \centering
-  \fbox{\rule{0pt}{80pt}\rule{\linewidth}{0pt}}
+  \includegraphics[width=\linewidth]{../figures/5.5.pdf}
   \caption{Effect of bin width on mean E2E latency.}
   \Description{Placeholder for the bin-width ablation figure.}
   \label{fig:ablation-1}
@@ -1164,7 +1390,7 @@ rates, comparing three configurations:
 
 \begin{figure}[h]
   \centering
-  \fbox{\rule{0pt}{80pt}\rule{0.8\linewidth}{0pt}}
+  \includegraphics[width=\linewidth]{../figures/5.6.pdf}
   \caption{Component ablation under mixed workload.}
   \Description{Placeholder for the component ablation figure.}
   \label{fig:ablation-2}
@@ -1194,7 +1420,7 @@ inside LLM engines.
 
 \begin{figure}[h]
   \centering
-  \fbox{\rule{0pt}{80pt}\rule{0.8\linewidth}{0pt}}
+  \includegraphics[width=\linewidth]{../figures/5.7.pdf}
   \caption{Heterogeneous GPU cluster evaluation results.}
   \Description{Placeholder for the heterogeneous cluster figure.}
   \label{fig:heterogeneous-comparison}
@@ -1227,22 +1453,68 @@ of 7 workflows/s, RAGS reduces mean E2E latency by approximately
 effectiveness and generalizability in heterogeneous inference clusters.
 
 %%
+%% Related Work
+\section{Related Work}\label{sec:related-work}
+
+\textbf{LLM Inference Engines.}
+vLLM~\cite{kwon2023efficient} introduces PagedAttention to manage KV cache
+with OS-style virtual memory paging, greatly reducing memory fragmentation
+and improving GPU utilization.  SGLang~\cite{zheng2024sglang} further
+proposes RadixAttention, indexing all historical KV caches in a radix tree
+to enable fine-grained cross-request prefix reuse and cache-aware routing.
+Sarathi-Serve~\cite{agrawal2024taming} mitigates prefill--decode interference
+via chunked prefills, while Orca~\cite{yu2022orca} pioneered continuous
+batching to keep GPUs fully occupied.  These systems optimize single-turn
+request serving but lack mechanisms to model multi-step workflow
+dependencies inherent in agent workloads.
+
+\textbf{LLM Agent Serving Systems.}
+Parrot~\cite{lin2024parrot} is among the first to address agent workflow
+scheduling: it introduces \emph{semantic variables} to expose inter-request
+data-flow to the serving layer and adopts session-affinity routing to
+maximize KV cache reuse across correlated requests.  Ayo~\cite{tan2025towards}
+decomposes complex LLM applications into primitive-level dataflow graphs
+and co-schedules LLM and non-LLM stages in a pipeline, cutting end-to-end
+latency.  Autellix~\cite{luo2025autellix} elevates the full agent program
+to the scheduling unit and proposes PLAS/ATLAS—multi-level feedback queue
+schedulers that use accumulated execution time on the critical path to
+mitigate head-of-line blocking.  KVFlow~\cite{pan2025kvflow} focuses on
+cache management for multi-agent workflows: it builds an agent execution
+graph, assigns priority to cache nodes based on estimated reuse distance,
+and employs asynchronous prefetching together with a future-reuse-aware
+eviction policy to raise cache hit rates.  HexGen-Flow~\cite{peng2025hexgen}
+proposes a two-level SLO-aware scheduler for Text-to-SQL pipelines,
+decomposing end-to-end budgets proportionally and using urgency-based
+preemption; however, it is tightly coupled to a specific pipeline structure
+and does not generalize to arbitrary agent topologies.
+
+\textbf{RL for Cluster Scheduling.}
+DeepRM~\cite{mao2016resource} and DL2~\cite{peng2021dl2} demonstrate the
+effectiveness of deep RL for resource scheduling in DNN training clusters.
+TORTA~\cite{du2025temporal} applies RL to LLM inference traffic routing
+across regions, dynamically adjusting per-window routing ratios.  Unlike
+these works, RAGS applies RL to \emph{agent workflow} routing, explicitly
+encoding workflow-level dependency states and KV cache residency to drive
+adaptive global dispatching.
+
+%%
 %% The acknowledgments section is defined using the "acks" environment
 %% (and NOT an unnumbered section). This ensures the proper
 %% identification of the section in the article metadata, and the
 %% consistent spelling of the heading.
-\begin{acks}
-To Robert, for the bagels and explaining CMYK and color spaces.
-\end{acks}
+%% \begin{acks}
+%% To Robert, for the bagels and explaining CMYK and color spaces.
+%% \end{acks}
 
 %%
 %% The next two lines define the bibliography style to be used, and
 %% the bibliography file.
 \bibliographystyle{ACM-Reference-Format}
-\bibliography{sample-base}
+\bibliography{../ref/refs}
 
 
-%%
+%% Appendix (disabled)
+\iffalse
 %% If your work has an appendix, this is the place to put it.
 \appendix
 
@@ -1275,6 +1547,7 @@ dui. Etiam sagittis eleifend elementum.
 Nam interdum magna at lectus dignissim, ac dignissim lorem
 rhoncus. Maecenas eu arcu ac neque placerat aliquam. Nunc pulvinar
 massa et mattis lacinia.
+\fi
 
 \end{document}
 \endinput
