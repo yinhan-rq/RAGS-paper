@@ -1,32 +1,31 @@
 # Fdb version 4
-["bibtex sample-sigconf-v2"] 1776828870.52129 "sample-sigconf-v2.aux" "sample-sigconf-v2.bbl" "sample-sigconf-v2" 1776828874.79627 0
+["bibtex sample-sigconf-v2"] 1777023378.20254 "sample-sigconf-v2.aux" "sample-sigconf-v2.bbl" "sample-sigconf-v2" 1777023479.16459 0
   "../ref/refs.bib" 1775567540.683 49903 0423e7c38352f2abdcd34722d6930b93 ""
   "e:/texlive/2025/texmf-dist/bibtex/bst/acmart/ACM-Reference-Format.bst" 1771035566.91712 93560 12e0ced1522ea2bfa9b2fb12855c7e9e ""
-  "sample-sigconf-v2.aux" 1776828873.50718 15152 6d63fc01c680ebad83a99b558149005b "pdflatex"
+  "sample-sigconf-v2.aux" 1777023477.81208 14260 5adffd28fe36086be7258ef4b6b87c0d "pdflatex"
   (generated)
   "sample-sigconf-v2.bbl"
   "sample-sigconf-v2.blg"
   (rewritten before read)
-["pdflatex"] 1776828871.19748 "e:/SYSU/acmart-primary/acmart-primary/data/sample-sigconf-v2.tex" "sample-sigconf-v2.pdf" "sample-sigconf-v2" 1776828874.7969 0
+["pdflatex"] 1777023475.48771 "e:/SYSU/acmart-primary/acmart-primary/data/sample-sigconf-v2.tex" "sample-sigconf-v2.pdf" "sample-sigconf-v2" 1777023479.16527 0
   "../figures/2.1.a.png" 1776596506.32785 15405 703c788d385312df2974236363bafd20 ""
   "../figures/2.1.b.png" 1776596470.57191 55416 58418655e010630f342d9cc799c976c3 ""
   "../figures/2.1.c.png" 1776670736.63396 52277 5aecdbb3a7fe31538d698337708b60b2 ""
-  "../figures/2.2.pdf" 1776594041.33079 64752 41bd7319e7cd3a13d8bf428c55ece4c8 ""
   "../figures/2.3.pdf" 1776594169.57518 120199 b3d48830a54bd369d05302482bccfdc0 ""
   "../figures/3.1.pdf" 1776676420.30341 125740 5e24f22fbaa5732336ad4a08fe0e9cc6 ""
   "../figures/3.2.png" 1776588997.25409 140035 a1bc351813d3370ac314d39c216730ce ""
   "../figures/3.3.pdf" 1776678159.94895 123954 f8fdb7d85373e6b2a51eba780bc99f6f ""
   "../figures/4.1.a.png" 1776686258.93204 74512 af251b72f7b0cbe065e5cba6bd98065e ""
   "../figures/4.1.b.png" 1776686269.33772 75003 f2e5a25e31f1d906be8bb14f54facfee ""
-  "../figures/5.2.a.pdf" 1776521860.58412 19260 94cd1f94a5c9c4ecc0b5ec5a3a3398ef ""
-  "../figures/5.2.b.pdf" 1776521800.67974 19242 ce00289acc0858f0c572cd827d419f54 ""
+  "../figures/5.2.a.pdf" 1776839109.66326 19451 36e7e00990b992fa64b8906ed134ccea ""
+  "../figures/5.2.b.pdf" 1776839179.825 19388 bee27b41ce09000cd0ccabe353729301 ""
   "../figures/5.2.c.pdf" 1776521591.00313 19342 1001caeeeaaa4b50a0be4c3de0b59e71 ""
   "../figures/5.2.d.pdf" 1776522084.16997 21429 a5cef7f83163284909ffe6d04fc1d533 ""
   "../figures/5.4.pdf" 1776569736.28015 18204 53854ac38d388c704b45947fe9f9cf9f ""
   "../figures/5.5.pdf" 1776570899.88773 16166 673dd09af84f9721b98f163f8be7ffd0 ""
   "../figures/5.6.pdf" 1776573192.70611 16771 7126298de3d618c6c4c4dfeaea519adf ""
   "../figures/5.7.pdf" 1776573817.55588 19453 1540e21d727a4f131f76a50432f9b198 ""
-  "e:/SYSU/acmart-primary/acmart-primary/data/sample-sigconf-v2.tex" 1776828868.74978 70302 51b6cb8c157dffd92d129f7e88ec69ab ""
+  "e:/SYSU/acmart-primary/acmart-primary/data/sample-sigconf-v2.tex" 1777023474.11088 65265 c55402a2af67df7d72c7f1a0fa8a29ec ""
   "e:/texlive/2025/texmf-dist/fonts/enc/dvips/inconsolata/i4-t1-4.enc" 1771037839.983 7693 0f2dce6d313c82989ec3a67fc24df2a0 ""
   "e:/texlive/2025/texmf-dist/fonts/enc/dvips/libertine/lbtn_25tcsq.enc" 1771038262.96234 2921 8ca0eb0831f9bc5da080d3697cfe67bf ""
   "e:/texlive/2025/texmf-dist/fonts/enc/dvips/libertine/lbtn_76gpa5.enc" 1771038262.97578 2933 9ad527ce78d7c5fa0a642dead095f172 ""
@@ -243,9 +242,9 @@
   "e:/texlive/2025/texmf-var/fonts/map/pdftex/updmap/pdftex.map" 1771041204 5587484 d72b140a5f167510480bd92137f4dac7 ""
   "e:/texlive/2025/texmf-var/web2c/pdftex/pdflatex.fmt" 1771041399 3636174 cc605f8343cb1f62696ef3373a359d73 ""
   "e:/texlive/2025/texmf.cnf" 1771041183.95676 713 baa45e065482d44c4cd81b98ef72c63b ""
-  "sample-sigconf-v2.aux" 1776828873.50718 15152 6d63fc01c680ebad83a99b558149005b "pdflatex"
-  "sample-sigconf-v2.bbl" 1776828871.14775 18136 f2a16c068eea7564f65295a6c43012fe "bibtex sample-sigconf-v2"
-  "sample-sigconf-v2.out" 1776828873.50845 3669 5cf4a4455c66eddbb97cdc82fd1b9262 "pdflatex"
+  "sample-sigconf-v2.aux" 1777023477.81208 14260 5adffd28fe36086be7258ef4b6b87c0d "pdflatex"
+  "sample-sigconf-v2.bbl" 1777023378.69642 18136 f2a16c068eea7564f65295a6c43012fe "bibtex sample-sigconf-v2"
+  "sample-sigconf-v2.out" 1777023477.81407 3992 527ac50ab14e0b4ddf02a5aea16c5049 "pdflatex"
   (generated)
   "sample-sigconf-v2.aux"
   "sample-sigconf-v2.log"
