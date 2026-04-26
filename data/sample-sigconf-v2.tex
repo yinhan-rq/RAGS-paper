@@ -275,45 +275,64 @@ confirm the complementary effects of both layers and strong generalizability acr
 
 \section{Introduction}
 
-Large Language Models (LLMs) have rapidly evolved from standalone research artifacts 
-into the computational backbone of diverse intelligent applications. Modern 
-LLM-based Agent systems (e.g., multi-turn chatbots, autonomous code generation 
-pipelines, and large-scale document processing workflows) inherently orchestrate 
-multiple inference calls into structured, multi-step execution graphs~\cite{yao2022react}. As these 
-deployments scale from research prototypes to production services handling 
-thousands of concurrent workflows, the efficiency of the underlying inference 
-infrastructure has emerged as a critical bottleneck~\cite{kwon2023efficient,yu2022orca}. In this context, the 
-global scheduler within a multi-tenant LLM serving cluster assumes 
-a critical role: it must simultaneously dictate the execution priority 
-of pending requests and route them to optimal backend instances, 
-with the primary objective of minimizing end-to-end workflow latency 
-under highly dynamic and heterogeneous workloads.
+Large Language Models (LLMs) have rapidly evolved from standalone research artifacts into 
+the computational backbone of diverse intelligent applications. Modern LLM serving systems 
+rely heavily on a global scheduler to manage request queuing and route inference calls across 
+backend instances~\cite{kwon2023efficient,yu2022orca}. However, these conventional schedulers 
+are fundamentally designed for independent, single-turn requests, treating each inference call 
+as an isolated scheduling unit.
 
-Classical scheduling strategies designed for stateless, single-turn inference 
-fall short in these dynamic scenarios, as they rely on assumptions that Agent 
-workloads inherently contradict. First, Agent workflows feature dynamic, nonlinear 
-topologies, such as conditional branches and iterative repair loops~\cite{yao2022react}. Because 
-actual execution paths and depths are resolved only at runtime, static graph-based 
-priority estimation becomes ineffective. Second, requests generated across different 
-stages of a single workflow are heterogeneous in input/output lengths and GPU 
-memory footprints. Consequently, uniform scheduling treatment typically induces 
-head-of-line blocking and resource imbalance. Third, adjacent calls within a workflow 
-contain overlapping context prefixes. This presents KV cache reuse opportunities~\cite{kwon2023efficient,zheng2024sglang}, 
-forcing a strict trade-off between cache locality and cluster-wide load balancing.
+LLM-based Agent systems inherently challenge this assumption. Applications such as multi-turn 
+chatbots, autonomous code generation pipelines, and large-scale document processing workflows 
+orchestrate multiple LLM calls into dynamic, multi-step execution graphs~\cite{yao2022react}. 
+As these deployments scale to handle thousands of concurrent workflows, global scheduling 
+must evolve beyond request-level efficiency. It must strictly account for workflow-level dependencies, 
+dynamic execution progress, and the critical trade-off between KV cache locality and cluster-wide load 
+balancing. Consequently, these structural properties expose severe limitations in existing global queuing 
+and routing policies.
 
-Existing approaches only partially address these scheduling challenges. On the queuing 
-side, FCFS remains unaware of workflow progress, propagating queuing delays along dataflow 
-edges. Topology-aware strategies like Ayo~\cite{tan2025towards} prioritize requests 
-based on static residual stage counts. However, they become ineffective when dynamic 
-branches and loops cause the estimated stage depth to deviate from the actual execution 
-trajectory. On the routing front, Round-Robin policies achieve load balance at the expense 
-of prefix-cache locality. Conversely, Session Affinity, as adopted by end-to-end systems 
-such as Parrot~\cite{lin2024parrot}, maximizes cache reuse via static session binding. 
-Yet, this approach induces hardware hotspots when parallel fan-out stages concentrate requests 
-on a single instance, and it lacks the adaptability to handle dynamic load shifts, frequently 
-resulting in cluster-wide load imbalances. Taken together, these limitations indicate that 
-effective global scheduling for LLM Agent serving necessitates the co-design of queuing and routing 
-algorithms, as neither tier can achieve robust performance in isolation.
+%%Classical scheduling strategies designed for stateless, single-turn inference 
+%%fall short in these dynamic scenarios, as they rely on assumptions that Agent 
+%%workloads inherently contradict. First, Agent workflows feature dynamic, nonlinear 
+%%topologies, such as conditional branches and iterative repair loops~\cite{yao2022react}. Because 
+%%actual execution paths and depths are resolved only at runtime, static graph-based 
+%%priority estimation becomes ineffective. Second, requests generated across different 
+%%stages of a single workflow are heterogeneous in input/output lengths and GPU 
+%%memory footprints. Consequently, uniform scheduling treatment typically induces 
+%%head-of-line blocking and resource imbalance. Third, adjacent calls within a workflow 
+%%contain overlapping context prefixes. This presents KV cache reuse opportunities~\cite{kwon2023efficient,zheng2024sglang}, 
+%%forcing a strict trade-off between cache locality and cluster-wide load balancing.
+
+%%Existing approaches only partially address these scheduling challenges. On the queuing 
+%%side, FCFS remains unaware of workflow progress, propagating queuing delays along dataflow 
+%%edges. Topology-aware strategies like Ayo~\cite{tan2025towards} prioritize requests 
+%%based on static residual stage counts. However, they become ineffective when dynamic 
+%%branches and loops cause the estimated stage depth to deviate from the actual execution 
+%%trajectory. On the routing front, Round-Robin policies achieve load balance at the expense 
+%%of prefix-cache locality. Conversely, Session Affinity, as adopted by end-to-end systems 
+%%such as Parrot~\cite{lin2024parrot}, maximizes cache reuse via static session binding. 
+%%Yet, this approach induces hardware hotspots when parallel fan-out stages concentrate requests 
+%%on a single instance, and it lacks the adaptability to handle dynamic load shifts, frequently 
+%%resulting in cluster-wide load imbalances. Taken together, these limitations indicate that 
+%%effective global scheduling for LLM Agent serving necessitates the co-design of queuing and routing 
+%%algorithms, as neither tier can achieve robust performance in isolation.
+On the queuing side, Agent workflows diverge fundamentally from conventional single-turn workloads in both 
+structure and objective. Because these workflows frequently incorporate conditional branches and iterative 
+repair loops, their true execution paths and depths are resolved only at runtime. Consequently, static topology-aware 
+priority estimation becomes highly unreliable whenever branch outcomes or loop iterations deviate from prior expectations. 
+Traditional First-Come-First-Serve (FCFS) queuing is equally inadequate; by remaining entirely oblivious to workflow progress, 
+it often stalls near-completion tasks and amplifies end-to-end latency along dataflow dependencies. Furthermore, because 
+requests from different workflow stages exhibit substantial variance in context lengths, generation lengths, and GPU memory 
+footprints, applying a uniform scheduling treatment inevitably induces head-of-line blocking and resource imbalance.
+
+On the routing side, Agent workloads force schedulers to navigate a strict trade-off between two competing objectives: 
+cache locality and load balancing. Because adjacent inference calls within the same workflow typically share overlapping 
+context prefixes, they present significant opportunities for KV cache reuse~\cite{kwon2023efficient,zheng2024sglang}. 
+However, optimizing routing exclusively for cache locality frequently overloads specific backend instances, particularly 
+during parallel fan-out stages. While conventional Round-Robin routing achieves uniform global load distribution, it 
+completely sacrifices this prefix cache locality. Conversely, static session affinity, as adopted by systems like 
+Parrot~\cite{lin2024parrot}, maximizes cache reuse via fixed instance binding but inevitably triggers hardware hotspots 
+and struggles to adapt to dynamic runtime load shifts.
 
 In response to these challenges, we present \textbf{RAGS} (\underline{R}L-based \underline{A}gent 
 \underline{G}lobal \underline{S}cheduler), a co-designed global scheduling framework that 
@@ -810,7 +829,7 @@ a relative prediction error of approximately 10\%.
 \label{subsec:policy-net}
 
 To capture complex temporal dependencies and heterogeneous instance
-features, we introduce a Transformer-based scheduling network that
+features, we introduce a Transformer-based~\cite{vaswani2017attention} scheduling network that
 jointly encodes the target request, the waiting queue context,
 and the runtime state of each instance.
 Figure~\ref{fig:routing-policy-net} illustrates the network topology.
@@ -1159,7 +1178,7 @@ across varying arrival rates, comparing three configurations:
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.8\linewidth]{../figures/5.6.pdf}
+  \includegraphics[width=0.85\linewidth]{../figures/5.6.pdf}
   \caption{Component ablation under mixed workload.}
   \label{fig:ablation-2}
 \end{figure}
@@ -1185,7 +1204,7 @@ within backend LLM engines.
 
 \begin{figure}[h]
   \centering
-  \includegraphics[width=0.8\linewidth]{../figures/5.7.pdf}
+  \includegraphics[width=0.85\linewidth]{../figures/5.7.pdf}
   \caption{Heterogeneous GPU cluster evaluation results.}
   \label{fig:heterogeneous-comparison}
 \end{figure}
